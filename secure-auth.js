@@ -48,6 +48,34 @@ async function adminTools(section,students){
  const name=input(ar()?'اسم صاحب الحساب':'Account name'),email=input(ar()?'البريد الإلكتروني':'Email','email'),password=input(ar()?'كلمة مرور مؤقتة (6 أحرف على الأقل)':'Temporary password (6 characters minimum)','password');password.minLength=6;password.autocomplete='new-password';
  const kind=dropdown(ar()?'نوع الحساب':'Account role',[['parent',ar()?'ولي أمر':'Parent'],['teacher',ar()?'معلم':'Teacher'],['admin',ar()?'مدير':'Admin']]);
  const createBox=actionForm(ar()?'إنشاء حساب':'Create account',[name,email,password,kind],async()=>{try{const r=await fetch(cfg.url+'/functions/v1/manage-account',{method:'POST',headers:{apikey:cfg.publishableKey,Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({action:'create',name:name.value,email:email.value,password:password.value,role:kind.value})});if(r.status===404||r.status===503)throw new Error('Account service unavailable');if(!r.ok)throw new Error('Failed');}finally{password.value='';}},ar()?'إنشاء الحساب':'Create account');createBox.dataset.area='accounts';tools.append(createBox);
+ const passwordBox=node('article','');passwordBox.className='portal-card account-password-panel';passwordBox.dataset.area='accounts';
+ passwordBox.append(node('h3',ar()?'إعادة تعيين كلمة المرور':'Reset account password'),node('p',ar()?'اختر حساب معلم أو ولي أمر وحدّد كلمة مرور جديدة من ٦ أحرف على الأقل. كلمات المرور الحالية لا يمكن عرضها.':'Choose a teacher or parent and set a new password of at least 6 characters. Current passwords cannot be displayed.'));
+ const resetForm=node('form','');resetForm.className='portal-form';
+ const targets=accounts.filter(a=>a.role==='teacher'||a.role==='parent');
+ const target=dropdown(ar()?'الحساب المطلوب':'Account to reset',[['',ar()?'اختر الحساب':'Choose an account'],...targets.map(a=>[a.id,(a.display_name||a.id)+' — '+(a.role==='teacher'?(ar()?'معلم':'Teacher'):(ar()?'ولي أمر':'Parent'))])]);target.required=true;
+ const newPassword=input(ar()?'كلمة المرور الجديدة (٦ أحرف على الأقل)':'New password (6 characters minimum)','password');newPassword.minLength=6;newPassword.maxLength=128;newPassword.autocomplete='new-password';
+ const confirmPassword=input(ar()?'تأكيد كلمة المرور الجديدة':'Confirm new password','password');confirmPassword.minLength=6;confirmPassword.maxLength=128;confirmPassword.autocomplete='new-password';
+ const reveal=node('button',ar()?'إظهار الكلمة الجديدة':'Show new password');reveal.type='button';reveal.className='preview-button';reveal.setAttribute('aria-pressed','false');
+ reveal.addEventListener('click',()=>{const visible=newPassword.type==='password';newPassword.type=confirmPassword.type=visible?'text':'password';reveal.setAttribute('aria-pressed',String(visible));reveal.textContent=visible?(ar()?'إخفاء الكلمة الجديدة':'Hide new password'):(ar()?'إظهار الكلمة الجديدة':'Show new password');});
+ const resetButton=node('button',ar()?'حفظ كلمة المرور الجديدة':'Save new password');resetButton.type='submit';resetButton.className='button';resetButton.disabled=!targets.length;
+ const resetStatus=node('p','');resetStatus.setAttribute('role','status');
+ for(const [label,control] of [[ar()?'الحساب':'Account',target],[ar()?'كلمة المرور الجديدة':'New password',newPassword],[ar()?'تأكيد كلمة المرور':'Confirm password',confirmPassword]]){const field=node('label',label);field.append(control);resetForm.append(field);}
+ resetForm.append(reveal,resetButton,resetStatus);passwordBox.append(resetForm);tools.append(passwordBox);
+ const clearReset=()=>{newPassword.value=confirmPassword.value='';newPassword.type=confirmPassword.type='password';reveal.setAttribute('aria-pressed','false');reveal.textContent=ar()?'إظهار الكلمة الجديدة':'Show new password';};
+ target.addEventListener('change',()=>{clearReset();resetStatus.textContent='';});
+ resetForm.addEventListener('submit',async event=>{
+  event.preventDefault();resetStatus.textContent='';
+  if(newPassword.value!==confirmPassword.value){resetStatus.textContent=ar()?'كلمتا المرور غير متطابقتين.':'The passwords do not match.';return;}
+  const selected=targets.find(a=>a.id===target.value);if(!selected)return;
+  if(!confirm(ar()?'تغيير كلمة مرور حساب «'+(selected.display_name||selected.id)+'»؟ لن تعمل كلمة المرور السابقة بعد الحفظ.':'Reset the password for '+(selected.display_name||selected.id)+'? The previous password will no longer work.'))return;
+  resetButton.disabled=true;target.disabled=true;reveal.disabled=true;
+  try{
+   const response=await fetch(cfg.url+'/functions/v1/manage-account',{method:'POST',headers:{apikey:cfg.publishableKey,Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({action:'reset-password',id:selected.id,password:newPassword.value})});
+   if(!response.ok){resetStatus.textContent=response.status===401?(ar()?'انتهت الجلسة. سجّل دخولك مجددًا.':'Session expired. Sign in again.'):response.status===403?(ar()?'هذه العملية للإدارة ولحسابات المعلمين والأهل فقط.':'Only admins can reset teacher and parent accounts.'):(ar()?'تعذّر تغيير كلمة المرور. حاول مجددًا.':'Could not reset the password. Try again.');return;}
+   resetStatus.textContent=ar()?'تم تغيير كلمة المرور بنجاح. يمكن استخدام الكلمة الجديدة لتسجيل الدخول.':'Password updated. The new password can now be used to sign in.';
+  }catch{resetStatus.textContent=ar()?'تعذّر الاتصال بخدمة الحسابات. حاول مجددًا.':'Could not connect to the account service. Try again.';}
+  finally{clearReset();resetButton.disabled=false;target.disabled=false;reveal.disabled=false;}
+ });
  const roster=node('article','');roster.className='portal-card';roster.dataset.area='accounts';roster.append(node('h3',ar()?'الحسابات والصلاحيات':'Accounts and access'));
  for(const a of accounts){roster.append(node('p',(a.display_name||a.id)+' — '+a.role));for(const link of access.filter(x=>x.account_id===a.id)){const student=students.find(x=>x.id===link.student_id);const row=node('p',student?.name||link.student_id);const remove=node('button',ar()?'إلغاء الربط':'Unlink');remove.type='button';remove.className='preview-button';remove.addEventListener('click',async()=>{if(!confirm(ar()?'إلغاء وصول هذا الحساب للطالب؟':'Remove this account’s access to the student?'))return;remove.disabled=true;try{await request('/rest/v1/student_access?account_id=eq.'+a.id+'&student_id=eq.'+link.student_id,'DELETE');await displayRecords();}catch{remove.disabled=false;row.append(node('span',ar()?'تعذّر إلغاء الربط':'Could not unlink'));}});row.append(remove);roster.append(row);}}
 
