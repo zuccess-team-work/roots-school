@@ -32,11 +32,12 @@
     translated.forEach(element => { element.textContent = element.dataset[lang]; });
     navigation.setAttribute('aria-label', lang === 'ar' ? 'القائمة الرئيسية' : 'Main navigation');
     document.querySelector('.mobile-actions').setAttribute('aria-label', lang === 'ar' ? 'التسجيل والتواصل' : 'Admissions and contact');
-    languageButton.textContent = lang === 'ar' ? 'EN ↗' : 'AR ↗';
+    languageButton.textContent = 'AR / EN';
     languageButton.setAttribute('aria-label', lang === 'ar' ? 'Switch to English' : 'التبديل إلى العربية');
     document.title = lang === 'ar' ? 'Roots | مدرسة روتس الخاصة' : 'Roots | Private School';
     meta.content = lang === 'ar' ? 'Roots — مكان نتعلّم فيه، نكتشف، وننمو.' : 'Roots Private School — A place to learn, discover, and grow.';
     try { localStorage.setItem('roots-language', lang); } catch (_) {}
+    document.dispatchEvent(new CustomEvent('roots:languagechange'));
   }
   let saved = 'ar';
   try { saved = localStorage.getItem('roots-language') || 'ar'; } catch (_) {}
