@@ -22,7 +22,7 @@
  .hero{padding-top:28px;gap:24px}.hero-art.school-photo{aspect-ratio:4/5;max-width:480px;max-height:560px}
  .hero h1{font-size:clamp(36px,9vw,58px);line-height:1.23}.hero-description{font-size:18px}
  .section-head h2{line-height:1.35}.eyebrow{letter-spacing:1.3px}.section{padding-inline:6%;scroll-margin-top:8px}
- .journey-title{position:static}.journey-step{padding-inline:16px}.journey-step h3{font-size:clamp(25px,7vw,34px)}
+ .journey{row-gap:30px}.journey-title{position:static}.journey-step{padding-inline:16px}.journey-step h3{font-size:clamp(25px,7vw,34px)}
  .pride-grid,.school-photo-grid,.school-video-grid,.admission-grid{grid-template-columns:minmax(0,1fr)}
  .pride-item,.school-video-card,.admission-card{min-width:0}.admission-card{padding:22px 18px}.admission-card h3{font-size:24px}
  .school-film{padding:22px 18px}.play-visual{height:auto;aspect-ratio:4/3}.mobile-actions{gap:8px;padding-bottom:max(10px,env(safe-area-inset-bottom))}
