@@ -12,8 +12,27 @@ const show = message => { status.textContent = message; status.hidden = false; }
 const configured = /^https:\/\/[a-z0-9-]+\.supabase\.co$/.test(cfg.url) && typeof cfg.publishableKey === 'string' && /^sb_publishable_[A-Za-z0-9_-]+$/.test(cfg.publishableKey);
 async function request(path, method='GET', body) {
  const response = await fetch(cfg.url + path, {method,headers:{apikey:cfg.publishableKey, ...(token?{Authorization:'Bearer '+token}:{}), 'Content-Type':'application/json'}, ...(body?{body:JSON.stringify(body)}:{})});
- if (!response.ok) throw new Error('Request failed');
+ if(!response.ok){let detail={};try{detail=await response.json();}catch{}const error=new Error('Request failed');error.status=response.status;error.code=typeof detail.code==='string'?detail.code:null;const msg=String(detail.message||'');error.kind=/histor|closed|academic year/i.test(msg)?'history':/stale|expired|changed|preview/i.test(msg)?'stale':/date.*year/i.test(msg)?'date':null;throw error;}
  const text=await response.text();return text?JSON.parse(text):null;
+}
+// Private file transport keeps session tokens in this closure. Files are verified server-side.
+async function uploadFile(file){
+ await RootsSchoolClient.validateFile(file);
+ const prepared=await request('/rest/v1/rpc/school_prepare_file','POST',{p_name:file.name,p_mime_type:file.type,p_byte_size:file.size});
+ const path=prepared.path.split('/').map(encodeURIComponent).join('/');
+ const uploaded=await fetch(cfg.url+'/storage/v1/object/school-files/'+path,{method:'POST',headers:{apikey:cfg.publishableKey,Authorization:'Bearer '+token,'Content-Type':file.type,'x-upsert':'false'},body:file});
+ if(!uploaded.ok)throw Error('Request failed');
+ const verified=await fetch(cfg.url+'/functions/v1/verify-school-file',{method:'POST',headers:{apikey:cfg.publishableKey,Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({file_id:prepared.id})});
+ if(!verified.ok)throw Error('Request failed');
+ return{id:prepared.id,name:file.name,mime_type:file.type,byte_size:file.size};
+}
+async function fileURL(id){
+ const file=await request('/rest/v1/rpc/school_file_location','POST',{p_file_id:id});
+ const path=file.path.split('/').map(encodeURIComponent).join('/');
+ const signed=await request('/storage/v1/object/sign/school-files/'+path,'POST',{expiresIn:60});
+ const raw=signed.signedURL||signed.signedUrl;const url=new URL(raw.startsWith('/object/')?'/storage/v1'+raw:raw,cfg.url+'/storage/v1/');
+ if(url.origin!==new URL(cfg.url).origin||!url.pathname.startsWith('/storage/v1/object/sign/'))throw Error('Request failed');
+ return{url:url.href};
 }
 let refreshToken=null,refreshTimer=null;
 function scheduleRefresh(seconds){clearTimeout(refreshTimer);refreshTimer=setTimeout(async()=>{try{const next=await request('/auth/v1/token?grant_type=refresh_token','POST',{refresh_token:refreshToken});token=next.access_token;refreshToken=next.refresh_token;scheduleRefresh(next.expires_in);}catch{signOut();}},Math.max(30000,(seconds-120)*1000));}
@@ -42,64 +61,15 @@ async function contentTools(){
 }
 
 async function adminTools(section,students){
- const accounts=await request('/rest/v1/school_accounts?select=id,role,display_name&order=display_name');
- const access=await request('/rest/v1/student_access?select=account_id,student_id');
- const tools=node('div','');tools.className='portal-grid';
- const name=input(ar()?'اسم صاحب الحساب':'Account name'),email=input(ar()?'البريد الإلكتروني':'Email','email'),password=input(ar()?'كلمة مرور مؤقتة (6 أحرف على الأقل)':'Temporary password (6 characters minimum)','password');password.minLength=6;password.autocomplete='new-password';
- const kind=dropdown(ar()?'نوع الحساب':'Account role',[['parent',ar()?'ولي أمر':'Parent'],['teacher',ar()?'معلم':'Teacher'],['admin',ar()?'مدير':'Admin']]);
- const createBox=actionForm(ar()?'إنشاء حساب':'Create account',[name,email,password,kind],async()=>{try{const r=await fetch(cfg.url+'/functions/v1/manage-account',{method:'POST',headers:{apikey:cfg.publishableKey,Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({action:'create',name:name.value,email:email.value,password:password.value,role:kind.value})});if(r.status===404||r.status===503)throw new Error('Account service unavailable');if(!r.ok)throw new Error('Failed');}finally{password.value='';}},ar()?'إنشاء الحساب':'Create account');createBox.dataset.area='accounts';tools.append(createBox);
- const passwordBox=node('article','');passwordBox.className='portal-card account-password-panel';passwordBox.dataset.area='accounts';
- passwordBox.append(node('h3',ar()?'إعادة تعيين كلمة المرور':'Reset account password'),node('p',ar()?'اختر حساب معلم أو ولي أمر وحدّد كلمة مرور جديدة من ٦ أحرف على الأقل. كلمات المرور الحالية لا يمكن عرضها.':'Choose a teacher or parent and set a new password of at least 6 characters. Current passwords cannot be displayed.'));
- const resetForm=node('form','');resetForm.className='portal-form';
- const targets=accounts.filter(a=>a.role==='teacher'||a.role==='parent');
- const target=dropdown(ar()?'الحساب المطلوب':'Account to reset',[['',ar()?'اختر الحساب':'Choose an account'],...targets.map(a=>[a.id,(a.display_name||a.id)+' — '+(a.role==='teacher'?(ar()?'معلم':'Teacher'):(ar()?'ولي أمر':'Parent'))])]);target.required=true;
- const newPassword=input(ar()?'كلمة المرور الجديدة (٦ أحرف على الأقل)':'New password (6 characters minimum)','password');newPassword.minLength=6;newPassword.maxLength=128;newPassword.autocomplete='new-password';
- const confirmPassword=input(ar()?'تأكيد كلمة المرور الجديدة':'Confirm new password','password');confirmPassword.minLength=6;confirmPassword.maxLength=128;confirmPassword.autocomplete='new-password';
- const reveal=node('button',ar()?'إظهار الكلمة الجديدة':'Show new password');reveal.type='button';reveal.className='preview-button';reveal.setAttribute('aria-pressed','false');
- reveal.addEventListener('click',()=>{const visible=newPassword.type==='password';newPassword.type=confirmPassword.type=visible?'text':'password';reveal.setAttribute('aria-pressed',String(visible));reveal.textContent=visible?(ar()?'إخفاء الكلمة الجديدة':'Hide new password'):(ar()?'إظهار الكلمة الجديدة':'Show new password');});
- const resetButton=node('button',ar()?'حفظ كلمة المرور الجديدة':'Save new password');resetButton.type='submit';resetButton.className='button';resetButton.disabled=!targets.length;
- const resetStatus=node('p','');resetStatus.setAttribute('role','status');
- for(const [label,control] of [[ar()?'الحساب':'Account',target],[ar()?'كلمة المرور الجديدة':'New password',newPassword],[ar()?'تأكيد كلمة المرور':'Confirm password',confirmPassword]]){const field=node('label',label);field.append(control);resetForm.append(field);}
- resetForm.append(reveal,resetButton,resetStatus);passwordBox.append(resetForm);tools.append(passwordBox);
- const clearReset=()=>{newPassword.value=confirmPassword.value='';newPassword.type=confirmPassword.type='password';reveal.setAttribute('aria-pressed','false');reveal.textContent=ar()?'إظهار الكلمة الجديدة':'Show new password';};
- target.addEventListener('change',()=>{clearReset();resetStatus.textContent='';});
- resetForm.addEventListener('submit',async event=>{
-  event.preventDefault();resetStatus.textContent='';
-  if(newPassword.value!==confirmPassword.value){resetStatus.textContent=ar()?'كلمتا المرور غير متطابقتين.':'The passwords do not match.';return;}
-  const selected=targets.find(a=>a.id===target.value);if(!selected)return;
-  if(!confirm(ar()?'تغيير كلمة مرور حساب «'+(selected.display_name||selected.id)+'»؟ لن تعمل كلمة المرور السابقة بعد الحفظ.':'Reset the password for '+(selected.display_name||selected.id)+'? The previous password will no longer work.'))return;
-  resetButton.disabled=true;target.disabled=true;reveal.disabled=true;
-  try{
-   const response=await fetch(cfg.url+'/functions/v1/manage-account',{method:'POST',headers:{apikey:cfg.publishableKey,Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({action:'reset-password',id:selected.id,password:newPassword.value})});
-   if(!response.ok){resetStatus.textContent=response.status===401?(ar()?'انتهت الجلسة. سجّل دخولك مجددًا.':'Session expired. Sign in again.'):response.status===403?(ar()?'هذه العملية للإدارة ولحسابات المعلمين والأهل فقط.':'Only admins can reset teacher and parent accounts.'):(ar()?'تعذّر تغيير كلمة المرور. حاول مجددًا.':'Could not reset the password. Try again.');return;}
-   resetStatus.textContent=ar()?'تم تغيير كلمة المرور بنجاح. يمكن استخدام الكلمة الجديدة لتسجيل الدخول.':'Password updated. The new password can now be used to sign in.';
-  }catch{resetStatus.textContent=ar()?'تعذّر الاتصال بخدمة الحسابات. حاول مجددًا.':'Could not connect to the account service. Try again.';}
-  finally{clearReset();resetButton.disabled=false;target.disabled=false;reveal.disabled=false;}
+ await window.mountRootsAdmin(section,{
+  students,account,request,signOut,contentTools,uploadFile,fileURL,
+  manage:async body=>{
+   const response=await fetch(cfg.url+'/functions/v1/manage-account',{method:'POST',headers:{apikey:cfg.publishableKey,Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(body)});
+   if(!response.ok)throw new Error(response.status===401?(ar()?'انتهت الجلسة. سجّل دخولك مجددًا.':'Session expired. Sign in again.'):response.status===403?(ar()?'هذه العملية للإدارة فقط.':'Administrator access required.'):(ar()?'تعذّر حفظ الحساب. تحقق من البيانات وحاول مجددًا.':'Could not save account. Check the details and retry.'));
+   return response.json();
+  }
  });
- const roster=node('article','');roster.className='portal-card';roster.dataset.area='accounts';roster.append(node('h3',ar()?'الحسابات والصلاحيات':'Accounts and access'));
- for(const a of accounts){roster.append(node('p',(a.display_name||a.id)+' — '+a.role));for(const link of access.filter(x=>x.account_id===a.id)){const student=students.find(x=>x.id===link.student_id);const row=node('p',student?.name||link.student_id);const remove=node('button',ar()?'إلغاء الربط':'Unlink');remove.type='button';remove.className='preview-button';remove.addEventListener('click',async()=>{if(!confirm(ar()?'إلغاء وصول هذا الحساب للطالب؟':'Remove this account’s access to the student?'))return;remove.disabled=true;try{await request('/rest/v1/student_access?account_id=eq.'+a.id+'&student_id=eq.'+link.student_id,'DELETE');await displayRecords();}catch{remove.disabled=false;row.append(node('span',ar()?'تعذّر إلغاء الربط':'Could not unlink'));}});row.append(remove);roster.append(row);}}
-
- for(const selectedAccount of accounts.filter(x=>x.role==='teacher'||x.role==='parent')){
- const permissionBox=node('article','');permissionBox.className='portal-card';permissionBox.dataset.area=selectedAccount.role+'-links';
- permissionBox.append(node('h3',selectedAccount.display_name||(ar()?'حساب':'Account')),node('p',selectedAccount.role==='teacher'?(ar()?'حدّد طلاب هذا المعلم واحفظ.':'Select this teacher’s students and save.'):(ar()?'حدّد أطفال ولي الأمر واحفظ.':'Select this parent’s children and save.')));
- const form=node('form','');form.className='portal-form';
- const type=dropdown(ar()?'نوع الحساب':'Account type',[['teacher',ar()?'معلم':'Teacher'],['parent',ar()?'ولي أمر':'Parent']]);
- const who=dropdown(ar()?'الاسم':'Name',[]);who.required=true;
- type.value=selectedAccount.role;
- const classFilter=dropdown(ar()?'الصف':'Class',[['',ar()?'كل الصفوف':'All classes'],...[...new Set(students.map(x=>x.class_name).filter(Boolean))].map(x=>[x,x])]);
- if(selectedAccount.role==='teacher'){const label=node('label',ar()?'عرض طلاب الصف':'Show class');label.append(classFilter);form.append(label);}
- const picks=node('fieldset','');picks.className='student-picks';const status=node('p','');status.setAttribute('role','status');const save=node('button',ar()?'حفظ الطلاب':'Save students');save.type='submit';save.className='button';form.append(picks,save,status);permissionBox.append(form);let checks=[];
- function renderStudents(){checks=[];picks.replaceChildren();picks.append(node('legend',selectedAccount.role==='teacher'?(ar()?'طلاب المعلم':'Teacher’s students'):(ar()?'أطفال ولي الأمر':'Parent’s children')));save.disabled=!who.value||!students.length;if(!who.value){picks.append(node('p',ar()?'اختر الاسم أولًا.':'Choose a name first.'));return;}if(!students.length){picks.append(node('p',ar()?'أضف الطلاب من قسم الطلاب أولًا.':'Add students in Students first.'));return;}for(const student of students){const label=node('label','');label.className='student-pick';label.hidden=!!classFilter.value&&student.class_name!==classFilter.value;const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.value=student.id;checkbox.checked=access.some(x=>x.account_id===who.value&&x.student_id===student.id);label.append(checkbox,node('span',student.name+(student.class_name?' — '+student.class_name:'')));picks.append(label);checks.push(checkbox);}}
- function renderAccounts(){who.replaceChildren();for(const [id,label] of [['',ar()?'اختر الاسم':'Choose a name'],...accounts.filter(x=>x.role===type.value).map(x=>[x.id,x.display_name||x.id])]){const option=node('option',label);option.value=id;who.append(option);}who.value=selectedAccount.id;status.textContent='';renderStudents();}
- classFilter.addEventListener('change',()=>{checks.forEach(check=>{const student=students.find(x=>x.id===check.value);check.parentElement.hidden=!!classFilter.value&&student.class_name!==classFilter.value;});});
- type.addEventListener('change',renderAccounts);who.addEventListener('change',()=>{status.textContent='';renderStudents();});renderAccounts();
- form.addEventListener('submit',async event=>{event.preventDefault();if(!who.value)return;const accountId=who.value;const desired=new Set(checks.filter(x=>x.checked).map(x=>x.value));const current=access.filter(x=>x.account_id===accountId);const removed=current.filter(x=>!desired.has(x.student_id));const added=[...desired].filter(id=>!current.some(x=>x.student_id===id));if(!removed.length&&!added.length){status.textContent=ar()?'الطلاب محفوظون بالفعل.':'Students are already saved.';return;}if(removed.length&&!confirm(ar()?'سيتم إلغاء الربط مع '+removed.length+' طالب. متابعة؟':'Remove links to '+removed.length+' student(s)?'))return;save.disabled=true;type.disabled=who.disabled=true;checks.forEach(x=>x.disabled=true);try{for(const studentId of added){const link={account_id:accountId,student_id:studentId};await request('/rest/v1/student_access','POST',link);access.push(link);}for(const link of removed){await request('/rest/v1/student_access?account_id=eq.'+accountId+'&student_id=eq.'+link.student_id,'DELETE');access.splice(access.indexOf(link),1);}status.textContent=ar()?'تم حفظ الطلاب بنجاح.':'Students saved successfully.';}catch{status.textContent=ar()?'لم يكتمل حفظ جميع الروابط. راجع التحديد الظاهر وحاول مجددًا.':'Not all links were saved. Review the current selection and retry.';}finally{type.disabled=who.disabled=false;renderStudents();}});
- tools.append(permissionBox);
- }
- for(const student of students){const name=input(ar()?'اسم الطالب':'Student name'),className=input(ar()?'الصف':'Class');name.value=student.name;className.value=student.class_name;className.required=false;const studentBox=actionForm(ar()?'تعديل '+student.name:'Edit '+student.name,[name,className],()=>request('/rest/v1/students?id=eq.'+student.id,'PATCH',{name:name.value.trim(),class_name:className.value.trim()}));studentBox.dataset.area='students';tools.append(studentBox);}
- tools.append(await contentTools());section.append(tools);
 }
-
 
 function organizeDashboard(section){
  if(role==='parent')return;
@@ -151,19 +121,20 @@ async function parentJourney(section,students){
  function avatar(name){const a=node('span',name.trim().split(/\s+/).slice(0,2).map(x=>x[0]).join(' '));a.className='child-avatar';a.setAttribute('role','img');a.setAttribute('aria-label',ar()?'مكان صورة '+name:'Photo placeholder for '+name);return a;}
  const labels=[['attendance','الحضور','Attendance','سجل أيام طفلك في المدرسة.','Your child’s school attendance.'],['progress','التقدّم والتعلّم','Learning & progress','خطوات جديدة في رحلة التعلّم.','New steps in their learning journey.'],['activity','الأنشطة واللحظات','Activities & moments','اكتشافات وتجارب من يوم طفلك.','Discoveries from your child’s day.'],['message','رسائل المعلم','Teacher messages','تواصل المدرسة مع العائلة.','Updates from school to your family.']];
  async function selectChild(index){selection++;const current=selection;buttons.forEach((b,i)=>{b.setAttribute('aria-pressed',String(i===index));});content.replaceChildren();const student=students[index];const profile=node('article','');profile.className='child-profile';const photo=node('div','');photo.className='child-photo-slot';photo.append(avatar(student.name),node('small',ar()?'صورة الطفل قريبًا':'Child photo coming soon'));const info=node('div','');info.append(node('p',ar()?'ملف طفلك':'Your child’s profile'),node('h2',student.name));const grade=student.class_name;const grades=['','الأول','الثاني','الثالث','الرابع','الخامس','السادس','السابع','الثامن','التاسع','العاشر','الحادي عشر','الثاني عشر'];info.append(node('span',ar()&&/^\d+$/.test(grade)&&grades[Number(grade)]?'الصف '+grades[Number(grade)]:(ar()?'الصف: ':'Class: ')+(grade||(ar()?'لم يُحدّد بعد':'Not assigned'))));profile.append(photo,info);content.append(profile);
- const schedule=node('section','');schedule.className='child-schedule';schedule.append(node('h3',ar()?'الجدول الدراسي':'School timetable'),node('p',ar()?'أيام طفلك في المدرسة، في مكان واحد.':'Your child’s school week, in one place.'));const pending=node('div','');pending.className='schedule-pending';const icon=node('span','▦');icon.className='schedule-icon';icon.setAttribute('aria-hidden','true');const copy=node('div','');copy.append(node('strong',ar()?'الجدول الدراسي قريبًا':'Timetable coming soon'),node('p',ar()?'لم تُضف المدرسة الجدول بعد. ستظهر هنا الأيام والحصص وأوقاتها عندما يتوفر.':'The school has not added the timetable yet. Days, lessons and times will appear here when available.'));pending.append(icon,copy);schedule.append(pending);content.append(schedule);const grid=node('div','');grid.className='journey-grid';content.append(grid);let updates;try{updates=await request('/rest/v1/learning_updates?select=id,category,note,created_at&student_id=eq.'+encodeURIComponent(student.id)+'&order=created_at.desc');}catch{if(current===selection)grid.append(node('p',ar()?'تعذّر تحميل التحديثات. حاول مجددًا.':'Could not load updates. Please try again.'));return;}if(current!==selection)return;
- for(const [category,a,e,descriptionA,descriptionE] of labels){const card=node('section','');card.className='journey-category '+category;card.append(node('h3',ar()?a:e),node('p',ar()?descriptionA:descriptionE));const rows=updates.filter(x=>x.category===category);if(!rows.length){const empty=node('div','');empty.className='journey-empty';empty.append(node('span',ar()?'لا توجد تحديثات بعد':'No updates yet'),node('small',ar()?'ستظهر هنا عندما يضيفها المعلم.':'Updates will appear when the teacher adds them.'));card.append(empty);}for(const u of rows){const entry=node('article','');entry.className='journey-entry';entry.append(node('p',u.note),node('time',new Date(u.created_at).toLocaleDateString(ar()?'ar':'en',{day:'numeric',month:'long',year:'numeric'})));card.append(entry);}grid.append(card);}
+ const schedule=node('section','');schedule.className='child-schedule';schedule.append(node('h3',ar()?'الجدول الدراسي':'School timetable'),node('p',ar()?'أيام طفلك في المدرسة، في مكان واحد.':'Your child’s school week, in one place.'));const pending=node('div','');pending.className='schedule-pending';const icon=node('span','▦');icon.className='schedule-icon';icon.setAttribute('aria-hidden','true');const copy=node('div','');copy.append(node('strong',ar()?'الجدول الدراسي قريبًا':'Timetable coming soon'),node('p',ar()?'لم تُضف المدرسة الجدول بعد. ستظهر هنا الأيام والحصص وأوقاتها عندما يتوفر.':'The school has not added the timetable yet. Days, lessons and times will appear here when available.'));pending.append(icon,copy);schedule.append(pending);content.append(schedule);const grid=node('div','');grid.className='journey-grid';content.append(grid);let updates;try{updates=await request('/rest/v1/learning_updates?select=id,category,note,event_date,subject,attendance_status,created_at&student_id=eq.'+encodeURIComponent(student.id)+'&order=created_at.desc');}catch{if(current===selection)grid.append(node('p',ar()?'تعذّر تحميل التحديثات. حاول مجددًا.':'Could not load updates. Please try again.'));return;}if(current!==selection)return;
+ for(const [category,a,e,descriptionA,descriptionE] of labels){const card=node('section','');card.className='journey-category '+category;card.append(node('h3',ar()?a:e),node('p',ar()?descriptionA:descriptionE));const rows=updates.filter(x=>x.category===category);if(!rows.length){const empty=node('div','');empty.className='journey-empty';empty.append(node('span',ar()?'لا توجد تحديثات بعد':'No updates yet'),node('small',ar()?'ستظهر هنا عندما يضيفها المعلم.':'Updates will appear when the teacher adds them.'));card.append(empty);}for(const u of rows){const entry=node('article','');entry.className='journey-entry';if(u.subject)entry.append(node('strong',u.subject));if(u.attendance_status){const states={present:ar()?'حاضر':'Present',absent:ar()?'غائب':'Absent',late:ar()?'متأخر':'Late',excused:ar()?'غياب بعذر':'Excused absence'};entry.append(node('strong',states[u.attendance_status]||u.attendance_status));}entry.append(node('p',u.note),node('time',new Date(u.event_date?u.event_date+'T12:00:00':u.created_at).toLocaleDateString(ar()?'ar':'en',{day:'numeric',month:'long',year:'numeric'})));card.append(entry);}grid.append(card);}
  }
  students.forEach((student,index)=>{const button=node('button','');button.type='button';button.className='child-choice';button.append(avatar(student.name),node('span',student.name));button.addEventListener('click',()=>selectChild(index));buttons.push(button);selector.append(button);});section.append(node('h2',ar()?'أطفالي':'My children'),selector,content);await selectChild(0);
 }
 
 async function displayRecords() {
- const students=await request('/rest/v1/students?select=id,name,class_name&order=name');
+ const students=await request('/rest/v1/students?select=id,'+(role==='admin'||role==='teacher'?'student_number,':'')+'name,class_name,archive_status,current_year_id,row_version&order=name');
  document.getElementById('secure-records')?.remove();
  const section=document.createElement('div');section.id='secure-records';section.className='portal-card';
- if(role==='parent')await parentJourney(section,students);
+ if(role==='parent'){await window.mountRootsParent(section,{students,account,request,signOut,uploadFile,fileURL});for(const child of dashboard.children)child.hidden=true;dashboard.prepend(section);return;}
  else section.append(node('h2',role==='admin'?(ar()?'لوحة إدارة المدرسة':'School administration'):(ar()?'الطلاب المسموح لك الوصول إليهم':'Your authorized students')));
- if(role==='admin')await adminTools(section,students);
+ if(role==='teacher'){await window.mountRootsTeacher(section,{students,account,request,signOut,uploadFile,fileURL});for(const child of dashboard.children)child.hidden=true;dashboard.prepend(section);return;}
+ if(role==='admin'){await adminTools(section,students);for(const child of dashboard.children)child.hidden=true;dashboard.prepend(section);return;}
  if(role!=='parent'&&!students.length)section.append(node('p',ar()?'لا توجد بيانات أو تعيينات بعد.':'No students or assignments yet.'));
  for(const student of (role==='parent'?[]:students)){
   const card=document.createElement('article');card.className='portal-card';card.append(node('h3',student.name),node('p',student.class_name));
@@ -196,7 +167,7 @@ async function displayRecords() {
  const logout=node('button',ar()?'تسجيل الخروج':'Sign out');logout.type='button';logout.className='preview-button';logout.addEventListener('click',signOut);section.append(logout);for(const child of dashboard.children)child.hidden=true;dashboard.prepend(section);
 }
 if(!form)return;
- document.getElementById('portal-language').addEventListener('click',()=>{if(account)displayRecords().catch(()=>{});});
+ document.addEventListener('roots:languagechange',()=>{if(account)displayRecords().catch(()=>{});});
 // Replace the preview-only submission handler; leave explicitly labelled previews available.
 const fresh=form.cloneNode(true);form.replaceWith(fresh);
 fresh.addEventListener('submit',async event=>{
